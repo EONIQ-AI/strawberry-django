@@ -1,0 +1,57 @@
+name: Publish to EONIQ CodeArtifact
+
+# This fork (moved here from a personal account, see the repo's transfer
+# history) exists to carry a few small patches ahead of upstream
+# strawberry-graphql/strawberry-django — see README/commit history on
+# lazy-gis-import. Consumers (logi-sense) used to pin it as a live git+https
+# dependency, which turned out to fail intermittently: PowerRunner's shared
+# egress IP hits GitHub's anonymous git-clone rate limit, and the job's own
+# GITHUB_TOKEN can't authenticate to a repo outside its own scope to work
+# around that. Publishing a real package to the existing eoniq CodeArtifact
+# index (the same one eoniq-libs uses) sidesteps both: it's an ordinary
+# versioned dependency resolved through the same OIDC-federated, always-
+# reliable path every other private EONIQ package already uses.
+#
+# The version carries a `+eoniqN` local segment (PEP 440) so it can never be
+# mistaken for the real upstream release of the same name.
+on:
+  push:
+    tags:
+      - 'eoniq-v*'
+  workflow_dispatch:
+
+env:
+  AWS_ACCOUNT_ID: '699475936937'
+  AWS_REGION: eu-central-1
+  CODEARTIFACT_DOMAIN: eoniq
+  CODEARTIFACT_REPOSITORY: eoniq
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC federation into the GithubActions role
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/GithubActions
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish to CodeArtifact
+        run: |
+          export UV_PUBLISH_URL="https://${CODEARTIFACT_DOMAIN}-${AWS_ACCOUNT_ID}.d.codeartifact.${AWS_REGION}.amazonaws.com/pypi/${CODEARTIFACT_REPOSITORY}/"
+          export UV_PUBLISH_USERNAME=aws
+          UV_PUBLISH_PASSWORD=$(aws codeartifact get-authorization-token \
+            --domain "$CODEARTIFACT_DOMAIN" --domain-owner "$AWS_ACCOUNT_ID" \
+            --query authorizationToken --output text)
+          export UV_PUBLISH_PASSWORD
+          uv publish dist/strawberry_graphql_django-*
