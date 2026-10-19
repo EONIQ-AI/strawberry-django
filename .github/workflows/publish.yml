@@ -14,10 +14,15 @@ name: Publish to EONIQ CodeArtifact
 #
 # The version carries a `+eoniqN` local segment (PEP 440) so it can never be
 # mistaken for the real upstream release of the same name.
+#
+# Every push to an `eoniq/<upstream version>` branch publishes, like eoniq-libs'
+# develop: the version is `<upstream version>+eoniq<N>`, N the commits on top of
+# upstream's release tag, so nobody bumps it by hand. A version already on the
+# index is skipped. Consumers (eoniq-django-graphql-relay) pin one exactly.
 on:
   push:
-    tags:
-      - 'eoniq-v*'
+    branches:
+      - 'eoniq/**'
   workflow_dispatch:
 
 env:
@@ -34,10 +39,19 @@ jobs:
       id-token: write   # OIDC federation into the GithubActions role
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v4
 
-      - name: Build wheel + sdist
-        run: uv build
+      - name: Derive the version
+        run: |
+          upstream="${GITHUB_REF_NAME#eoniq/}"
+          # The fork does not carry upstream's tags; take the release tag from upstream.
+          git fetch --no-tags https://github.com/strawberry-graphql/strawberry-django \
+            "refs/tags/${upstream}:refs/tags/${upstream}"
+          version="${upstream}+eoniq$(git rev-list --count "${upstream}..HEAD")"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "Version: $version"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -46,7 +60,26 @@ jobs:
           role-session-name: GitHub_to_AWS_via_FederatedOIDC
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Skip a version already published
+        run: |
+          published=$(aws codeartifact list-package-versions \
+            --domain "$CODEARTIFACT_DOMAIN" --domain-owner "$AWS_ACCOUNT_ID" \
+            --repository "$CODEARTIFACT_REPOSITORY" --format pypi \
+            --package strawberry-graphql-django \
+            --query 'versions[].version' --output text 2>/dev/null || true)
+          if printf '%s\n' $published | grep -qxF "$VERSION"; then
+            echo "$VERSION is already published."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build wheel + sdist
+        if: env.SKIP != '1'
+        run: |
+          uv version --frozen "$VERSION"
+          uv build
+
       - name: Publish to CodeArtifact
+        if: env.SKIP != '1'
         run: |
           export UV_PUBLISH_URL="https://${CODEARTIFACT_DOMAIN}-${AWS_ACCOUNT_ID}.d.codeartifact.${AWS_REGION}.amazonaws.com/pypi/${CODEARTIFACT_REPOSITORY}/"
           export UV_PUBLISH_USERNAME=aws

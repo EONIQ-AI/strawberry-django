@@ -1,6 +1,6 @@
 [project]
 name = "strawberry-graphql-django"
-version = "0.93.0+eoniq1"
+version = "0.93.0"  # +eoniq<N> is set by .github/workflows/publish.yml
 description = "Strawberry GraphQL Django extension"
 authors = [
   { name = "Lauri Hintsala", email = "lauri.hintsala@verkkopaja.fi" },
