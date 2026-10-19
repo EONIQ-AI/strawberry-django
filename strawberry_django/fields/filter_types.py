@@ -14,6 +14,7 @@ from django.db.models import Q
 from strawberry import UNSET
 
 from strawberry_django.filters import resolve_value
+from strawberry_django.utils.geodjango import import_geodjango
 
 from .filter_order import filter_field
 
@@ -236,7 +237,7 @@ type_filter_map: dict[type, type] = {
 }
 
 try:
-    from django.contrib.gis import geos
+    geos, _ = import_geodjango()
 except ImproperlyConfigured:
     # If gdal is not available, skip.
     GeometryFilterLookup = None  # type: ignore[assignment]
