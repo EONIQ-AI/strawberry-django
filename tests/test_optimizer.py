@@ -3856,3 +3856,101 @@ def test_method_resolver_without_relation_hint_does_not_descend(db):
     sqls = [q["sql"] for q in ctx.captured_queries]
     assert sqls, sqls
     assert "projects_milestone" not in sqls[0], sqls[0]
+
+
+class QAWarehouse(models.Model):
+    class Meta:
+        app_label = "tests"
+
+    nombre = CharField(max_length=50)
+
+
+class QAShelf(models.Model):
+    class Meta:
+        app_label = "tests"
+
+    nombre = CharField(max_length=50)
+    warehouse = models.ForeignKey(
+        QAWarehouse, on_delete=models.CASCADE, related_name="shelves"
+    )
+
+
+class QAShelfLabel(models.Model):
+    """Points at its shelf through a ForeignObject on a plain column, not a ForeignKey."""
+
+    class Meta:
+        app_label = "tests"
+
+    texto = CharField(max_length=50)
+    shelf_pk = models.IntegerField(null=True)
+    shelf = models.ForeignObject(
+        QAShelf,
+        on_delete=models.DO_NOTHING,
+        from_fields=["shelf_pk"],
+        to_fields=["id"],
+        related_name="+",
+        null=True,
+    )
+
+
+def _foreign_object_schema():
+    @strawberry_django.type(QAWarehouse)
+    class WarehouseType:
+        nombre: strawberry.auto
+
+    @strawberry_django.type(QAShelf)
+    class ShelfType:
+        nombre: strawberry.auto
+        warehouse: WarehouseType
+
+    @strawberry_django.type(QAShelfLabel)
+    class ShelfLabelType:
+        texto: strawberry.auto
+        shelf: ShelfType | None
+
+    @strawberry.type
+    class Query:
+        labels: list[ShelfLabelType] = strawberry_django.field()
+
+    return strawberry.Schema(query=Query, extensions=[DjangoOptimizerExtension])
+
+
+def _create_shelf_labels(count: int):
+    warehouse = QAWarehouse.objects.create(nombre="W")
+    for i in range(count):
+        shelf = QAShelf.objects.create(nombre=f"S{i}", warehouse=warehouse)
+        QAShelfLabel.objects.create(texto=f"L{i}", shelf_pk=shelf.pk)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_forward_foreign_object_and_the_relation_below_it_are_joined(db):
+    """A forward ForeignObject is joined like a ForeignKey, and so is what is selected below it."""
+    schema = _foreign_object_schema()
+    _create_shelf_labels(3)
+
+    query = "{ labels { texto shelf { nombre warehouse { nombre } } } }"
+    with CaptureQueriesContext(connection=connections[DEFAULT_DB_ALIAS]) as ctx:
+        result = schema.execute_sync(query)
+
+    assert result.errors is None, result.errors
+    assert result.data is not None
+    assert [label["shelf"]["warehouse"]["nombre"] for label in result.data["labels"]] == [
+        "W",
+        "W",
+        "W",
+    ]
+    assert len(ctx.captured_queries) == 1, [q["sql"] for q in ctx.captured_queries]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_forward_foreign_object_joins_only_what_is_selected(db):
+    """An unselected relation below a ForeignObject is not joined."""
+    schema = _foreign_object_schema()
+    _create_shelf_labels(2)
+
+    with CaptureQueriesContext(connection=connections[DEFAULT_DB_ALIAS]) as ctx:
+        result = schema.execute_sync("{ labels { texto shelf { nombre } } }")
+
+    assert result.errors is None, result.errors
+    assert len(ctx.captured_queries) == 1
+    assert QAWarehouse._meta.db_table not in ctx.captured_queries[0]["sql"]

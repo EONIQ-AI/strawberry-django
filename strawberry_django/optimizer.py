@@ -846,6 +846,21 @@ def _get_hints_from_model_property(
     return store
 
 
+def _is_forward_to_one(field: Any) -> bool:
+    """Whether *field* reaches one related row that a join can load.
+
+    ``ForeignKey`` and reverse ``OneToOneRel``, plus any other forward
+    ``ForeignObject`` pointing at one row, e.g. one joined on columns that are not
+    a key, or on an extra restriction alone. ``GenericRelation`` is a
+    ``ForeignObject`` too, but reaches many rows.
+    """
+    if isinstance(field, (models.ForeignKey, OneToOneRel)):
+        return True
+    return isinstance(field, models.ForeignObject) and bool(
+        field.many_to_one or field.one_to_one
+    )
+
+
 def _must_use_prefetch_related(
     config: OptimizerConfig,
     field: StrawberryField,
@@ -931,6 +946,15 @@ def _get_hints_from_django_foreign_key(
         only=[path],
         select_related=[path],
     )
+
+    # A ForeignObject that is not a ForeignKey has no column of its own: keep the
+    # columns it joins on, so the row can still reach its target if it is read lazily
+    if not isinstance(model_field, (models.ForeignKey, OneToOneRel)):
+        prefix = path.rpartition(LOOKUP_SEP)[0]
+        store.only.extend(
+            f"{prefix}{LOOKUP_SEP}{f.attname}" if prefix else f.attname
+            for f in model_field.local_related_fields
+        )
 
     # If adding a reverse relation, make sure to select its pointer to us,
     # or else this might causa a refetch from the database
@@ -1155,7 +1179,7 @@ def _get_hints_from_django_field(
                 return None
 
             if index < len(parts) - 1:
-                if not isinstance(current_field, (models.ForeignKey, OneToOneRel)):
+                if not _is_forward_to_one(current_field):
                     return None
 
                 related_model = getattr(current_field, "related_model", None)
@@ -1190,7 +1214,7 @@ def _get_hints_from_django_field(
     # `@strawberry_django.field(only=[...])` hints get silently dropped whenever the
     # parent uses a method resolver (issue #904).
     if has_base_resolver and not (
-        isinstance(model_field, (models.ForeignKey, OneToOneRel))
+        _is_forward_to_one(model_field)
         and _store_declares_select_related(
             getattr(field, "store", None), model_fieldname
         )
@@ -1200,7 +1224,7 @@ def _get_hints_from_django_field(
     lookup_prefix = prefix + LOOKUP_SEP if prefix else ""
     path = f"{lookup_prefix}{model_fieldname}"
 
-    if isinstance(model_field, (models.ForeignKey, OneToOneRel)):
+    if _is_forward_to_one(model_field):
         store = _get_hints_from_django_foreign_key(
             field,
             field_definition=field_definition,
